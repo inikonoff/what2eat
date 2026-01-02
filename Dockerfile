@@ -1,27 +1,72 @@
-# Используем легкий образ Python 3.11
-FROM python:3.11-slim
+import logging
+import sys
+import asyncio
+import os
+from aiohttp import web
+from aiogram import Bot, Dispatcher
+from aiogram.types import BotCommand
+from config import TELEGRAM_TOKEN
+from handlers import register_handlers
 
-# Отключаем создание кеш-файлов .pyc
-ENV PYTHONDONTWRITEBYTECODE 1
-# Отключаем буферизацию вывода (чтобы логи сразу летели в консоль Render)
-ENV PYTHONUNBUFFERED 1
+# Логирование
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    stream=sys.stdout
+)
+logger = logging.getLogger(__name__)
 
-# Создаем рабочую директорию
-WORKDIR /app
+# Инициализация
+bot = Bot(token=TELEGRAM_TOKEN)
+dp = Dispatcher()
+register_handlers(dp)
 
-# Сначала копируем только requirements, чтобы кэшировать слои
-COPY requirements.txt .
+# --- МИНИ-СЕРВЕР ДЛЯ UPTIMEROBOT ---
+async def health_check(request):
+    """Простой эндпоинт, чтобы бот не засыпал"""
+    return web.Response(text="Bot is alive!", status=200)
 
-# Обновляем pip и устанавливаем зависимости
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+async def start_web_server():
+    """Запуск веб-сервера на порту, который выдаст Render"""
+    app = web.Application()
+    app.router.add_get('/', health_check)
+    app.router.add_get('/health', health_check)
+    
+    # Render передает порт через переменную окружения PORT
+    # Если переменной нет (локальный запуск), используем 8080
+    port = int(os.environ.get("PORT", 8080))
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    logger.info(f"🌍 Web server started on port {port}")
 
-# Копируем остальной код проекта
-COPY . .
+# --- НАСТРОЙКА КОМАНД ---
+async def setup_commands(bot: Bot):
+    commands = [
+        BotCommand(command="/start", description="🔄 Рестарт / Новые продукты"),
+        BotCommand(command="/author", description="👨‍💻 Автор бота")
+    ]
+    try:
+        await bot.set_my_commands(commands)
+    except Exception as e:
+        logger.error(f"Failed to set commands: {e}")
 
-# Указываем, что контейнер будет слушать порт (для документации)
-# Render сам пробросит нужный порт через переменную окружения PORT
-EXPOSE 8080
+# --- ЗАПУСК ---
+async def main():
+    # 1. Запускаем веб-сервер (в фоне)
+    await start_web_server()
+    
+    # 2. Устанавливаем команды
+    await setup_commands(bot)
+    
+    # 3. Запускаем поллинг бота (это блокирующий процесс, поэтому он последний)
+    logger.info("🚀 Bot started polling...")
+    await dp.start_polling(bot)
 
-# Команда запуска
-CMD ["python", "main.py"]
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+    except (KeyboardInterrupt, SystemExit):
+        logger.info("Bot stopped")
